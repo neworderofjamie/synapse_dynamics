@@ -109,18 +109,28 @@ __global__ void continuousDenseFastDivide(unsigned int numSynapse, unsigned int 
 __global__ void continuousDenseBlock(unsigned int numPre, unsigned int numPost, unsigned int numPostPadded,
                                      float *d_output, float *d_ePre, float *d_g)
 {
+    extern __shared__ float s_ePre[];
+
     const unsigned int id = threadIdx.x + (blockIdx.x * blockDim.x);
     const unsigned int idPost = id % numPostPadded;
 
     // Get indices of first presynaptic neuron and synapse
     const unsigned int idPreStart = (id / numPostPadded) * blockDim.x;
     const unsigned int idPreEnd = min(idPreStart + blockDim.x, numPre);
+    const unsigned int numPreInBlock = idPreEnd - idPreStart;
     unsigned int idSyn = (idPreStart * numPost) + idPost;
+
+    // Use first threads in block to ePre into shared memory
+    if(threadIdx.x < numPreInBlock) {
+        s_ePre[threadIdx.x] = d_ePre[idPreStart + threadIdx.x];
+    }
+
+    __syncthreads();
 
     if(idPost < numPost) {
         float output = 0.0f;
         for(unsigned int i = idPreStart; i < idPreEnd; i++) {
-            output += d_g[idSyn] * d_ePre[i];
+            output += d_g[idSyn] * s_ePre[i - idPreStart];
 
             idSyn += numPost;
         }
@@ -281,12 +291,13 @@ int main(int argc, char *argv[])
         {
             Timer<std::milli> t("Continuous Dense Block:");
             const unsigned int numBlocks = numNeuronBlocks * numNeuronBlocks;
+            const unsigned int sharedBytes = blockSize * sizeof(unsigned int);
             dim3 threads(blockSize, 1);
             dim3 grid(numBlocks, 1);
 
             for(unsigned int i = 0; i < numTimesteps; i++) {
-                continuousDenseBlock<<<grid, threads>>>(numNeurons, numNeurons, numNeuronBlocks * blockSize,
-                                                        output.second, ePre.second, g.second);
+                continuousDenseBlock<<<grid, threads, sharedBytes>>>(numNeurons, numNeurons, numNeuronBlocks * blockSize,
+                                                                     output.second, ePre.second, g.second);
             }
 
             deviceToHostCopy(output, numNeurons);
