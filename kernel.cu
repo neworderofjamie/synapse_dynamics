@@ -79,7 +79,12 @@ enum class Model
     eProp,
 };
 
-__global__ void continuousDense(unsigned int numPre, unsigned int numPost, 
+__device__ uint32_t fastDivide(uint32_t x, uint32_t a, uint32_t b, uint32_t m)
+{
+    return (((uint64_t)x * a) + b) >> (32u + m);
+}
+
+__global__ void continuousDense(unsigned int numPre, unsigned int numPost,
                                 float *d_output, float *d_ePre, float *d_g)
 {
     const unsigned int id = threadIdx.x + (blockIdx.x * blockDim.x);
@@ -95,28 +100,9 @@ __global__ void continuousDenseFastDivide(unsigned int numSynapse, unsigned int 
     const unsigned int id = threadIdx.x + (blockIdx.x * blockDim.x);
 
     if(id < numSynapse) {
-        const unsigned int pre = (((uint64_t)id * numPostA) + numPostB) >> (32 + numPostM);
+        const unsigned int pre = fastDivide(id, numPostA, numPostB, numPostM);
         const unsigned int post = id - (numPost * pre);
         atomicAdd(&d_output[post], d_g[id] * d_ePre[pre]);
-    }
-}
-
-__global__ void continuousDenseSharedPre(unsigned int numPre, unsigned int numPost, unsigned int numPostPadded,
-                                         float *d_output, float *d_ePre, float *d_g)
-{
-    __shared__ float s_ePre;
-
-    const unsigned int id = threadIdx.x + (blockIdx.x * blockDim.x);
-    const unsigned int idPre = id / numPostPadded;
-    const unsigned int idPost = id % numPostPadded;
-    const unsigned int idSyn = (idPre * numPost) + idPost;
-
-    if(threadIdx.x == 0) {
-        s_ePre = d_ePre[idPre];
-    }
-    __syncthreads();
-    if(idPost < numPost) {
-        atomicAdd(&d_output[idPost], d_g[idSyn] * s_ePre);
     }
 }
 
@@ -140,40 +126,6 @@ __global__ void continuousDenseBlock(unsigned int numPre, unsigned int numPost, 
         }
         atomicAdd(&d_output[idPost], output);
     }
-}
-
-__global__ void continuousDenseThreadPerPost(unsigned int numPre, unsigned int numPost, 
-                                             float *d_output, float *d_ePre, float *d_g)
-{
-    extern __shared__ float s_ePre[];
-
-    const unsigned int id = threadIdx.x + (blockIdx.x * blockDim.x);
-    const unsigned int numBlocks = (numPre + blockDim.x - 1) / blockDim.x;
-
-    float output = 0.0f;
-    for(unsigned int b = 0; b < numBlocks; b++) {
-        // Determine how many presynaptic neurons are in this block
-        const unsigned int numPreInBlock = (b == (numBlocks - 1))
-            ? ((numPre - 1) % blockDim.x) + 1 : blockDim.x;
-
-        __syncthreads();
-
-        // Use first threads in block to ePre into shared memory
-        if(threadIdx.x < numPreInBlock) {
-            s_ePre[threadIdx.x] = d_ePre[(b * blockDim.x) + threadIdx.x];
-        }
-
-        __syncthreads();
-
-        if(id < numPost) {
-            unsigned int synAddress = (b * blockDim.x * numPost) + id;
-            for(unsigned int i = 0; i < numPreInBlock; i++, synAddress += numPost) {
-                output += d_g[synAddress] * d_ePre[i];
-            }
-        }
-    }
-
-    d_output[id] += output;
 }
 
 //-----------------------------------------------------------------------------
@@ -230,6 +182,7 @@ int main(int argc, char *argv[])
 {
     unsigned int blockSize = 32;
     unsigned int numNeurons = 10000;
+    unsigned int numTimesteps = 5000;
 
     // Read mode from command line
     Model model;
@@ -292,7 +245,7 @@ int main(int argc, char *argv[])
             dim3 threads(blockSize, 1);
             dim3 grid(numBlocks, 1);
 
-            for(unsigned int i = 0; i < 10; i++) {
+            for(unsigned int i = 0; i < numTimesteps; i++) {
                 continuousDense<<<grid, threads>>>(numNeurons, numNeurons, output.second, ePre.second, g.second);
             }
 
@@ -311,7 +264,7 @@ int main(int argc, char *argv[])
             dim3 threads(blockSize, 1);
             dim3 grid(numBlocks, 1);
 
-            for(unsigned int i = 0; i < 10; i++) {
+            for(unsigned int i = 0; i < numTimesteps; i++) {
                 continuousDenseFastDivide<<<grid, threads>>>(numSynapses, numNeurons, numPostA, numPostB, numPostM,
                                                              output.second, ePre.second, g.second);
             }
@@ -331,7 +284,7 @@ int main(int argc, char *argv[])
             dim3 threads(blockSize, 1);
             dim3 grid(numBlocks, 1);
 
-            for(unsigned int i = 0; i < 10; i++) {
+            for(unsigned int i = 0; i < numTimesteps; i++) {
                 continuousDenseBlock<<<grid, threads>>>(numNeurons, numNeurons, numNeuronBlocks * blockSize,
                                                         output.second, ePre.second, g.second);
             }
@@ -340,45 +293,6 @@ int main(int argc, char *argv[])
             const float sum = std::accumulate(&output.first[0], &output.first[numNeurons], 0.0f);
             std::cout << "Sum:" << sum << std::endl;
         }
-
-        // Zero output
-        /*std::fill_n(&output.first[0], numNeurons, 0.0f);
-        hostToDeviceCopy(output, numNeurons);
-
-        {
-            Timer<std::milli> t("Continuous Dense Shared Pre:");
-            const unsigned int numBlocks = numNeuronBlocks * numNeurons;
-            dim3 threads(blockSize, 1);
-            dim3 grid(numBlocks, 1);
-
-            for(unsigned int i = 0; i < 5000; i++) {
-                continuousDenseSharedPre<<<grid, threads>>>(numNeurons, numNeurons, numNeuronBlocks * blockSize,
-                                                            output.second, ePre.second, g.second);
-            }
-
-            deviceToHostCopy(output, numNeurons);
-            const float sum = std::accumulate(&output.first[0], &output.first[numNeurons], 0.0f);
-            std::cout << "Sum:" << sum << std::endl;
-        }
-        // Zero output
-        std::fill_n(&output.first[0], numNeurons, 0.0f);
-        hostToDeviceCopy(output, numNeurons);
-
-        {
-            Timer<std::milli> t("Continuous Dense Thread Per Post:");
-            const unsigned int numBlocks = (numSynapses + blockSize - 1) / blockSize;
-            const unsigned int sharedBytes = blockSize * sizeof(unsigned int);
-            dim3 threads(blockSize, 1);
-            dim3 grid(numBlocks, 1);
-
-            for(unsigned int i = 0; i < 5000; i++) {
-                continuousDenseThreadPerPost<<<grid, threads, sharedBytes>>>(numNeurons, numNeurons, output.second, ePre.second, g.second);
-            }
-
-            deviceToHostCopy(output, numNeurons);
-            const float sum = std::accumulate(&output.first[0], &output.first[numNeurons], 0.0f);
-            std::cout << "Sum:" << sum << std::endl;
-        }*/
     }
     return EXIT_SUCCESS;
 }
