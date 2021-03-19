@@ -39,39 +39,6 @@
 template<typename T>
 using HostDeviceArray = std::pair < T*, T* > ;
 
-//------------------------------------------------------------------------
-// Timer
-//------------------------------------------------------------------------
-template<typename A = std::milli>
-class Timer
-{
-public:
-    Timer(const std::string &title) : m_Start(std::chrono::high_resolution_clock::now()), m_Title(title)
-    {
-    }
-
-    ~Timer()
-    {
-        std::cout << m_Title << get() << std::endl;
-    }
-
-    //------------------------------------------------------------------------
-    // Public API
-    //------------------------------------------------------------------------
-    double get() const
-    {
-        auto now = std::chrono::high_resolution_clock::now();
-        std::chrono::duration<double, std::milli> duration = now - m_Start;
-        return duration.count();
-    }
-
-private:
-    //------------------------------------------------------------------------
-    // Members
-    //------------------------------------------------------------------------
-    std::chrono::time_point<std::chrono::high_resolution_clock> m_Start;
-    std::string m_Title;
-};
 
 enum class Model
 {
@@ -284,6 +251,11 @@ int main(int argc, char *argv[])
 
     CHECK_CUDA_ERRORS(cudaSetDevice(0));
 
+    cudaEvent_t updateStart;
+    cudaEvent_t updateEnd;
+    CHECK_CUDA_ERRORS(cudaEventCreate(&updateStart));
+    CHECK_CUDA_ERRORS(cudaEventCreate(&updateEnd));
+
     std::mt19937 rng;
     std::normal_distribution<float> dis(0.0f, 1.0f);
 
@@ -307,20 +279,22 @@ int main(int argc, char *argv[])
         hostToDeviceCopy(output, numNeurons);
 
         {
-            {
-                Timer<std::milli> t("Continuous Dense:");
-                const unsigned int numBlocks = (numSynapses + blockSize - 1) / blockSize;
-                dim3 threads(blockSize, 1);
-                dim3 grid(numBlocks, 1);
+            const unsigned int numBlocks = (numSynapses + blockSize - 1) / blockSize;
+            dim3 threads(blockSize, 1);
+            dim3 grid(numBlocks, 1);
 
-                for(unsigned int i = 0; i < numTimesteps; i++) {
-                    continuousDense<<<grid, threads>>>(numNeurons, numNeurons, output.second, ePre.second, g.second);
-                }
+            CHECK_CUDA_ERRORS(cudaEventRecord(updateStart));
+            for(unsigned int i = 0; i < numTimesteps; i++) {
+                continuousDense<<<grid, threads>>>(numNeurons, numNeurons, output.second, ePre.second, g.second);
             }
+            CHECK_CUDA_ERRORS(cudaEventRecord(updateEnd));
+            CHECK_CUDA_ERRORS(cudaEventSynchronize(updateEnd));
+            float time;
+            CHECK_CUDA_ERRORS(cudaEventElapsedTime(&time, updateStart, updateEnd));
 
             deviceToHostCopy(output, numNeurons);
             const float sum = std::accumulate(&output.first[0], &output.first[numNeurons], 0.0f);
-            std::cout << "Sum:" << sum << std::endl;
+            std::cout << "Continous Dense: sum:" << sum << ", time:" << time << std::endl;
         }
 
         // Zero output
@@ -328,22 +302,24 @@ int main(int argc, char *argv[])
         hostToDeviceCopy(output, numNeurons);
 
         {
-            {
-                Timer<std::milli> t("Continuous Dense Block:");
-                const unsigned int numBlocks = numNeuronBlocks * numNeuronBlocks;
-                const unsigned int sharedBytes = blockSize * sizeof(unsigned int);
-                dim3 threads(blockSize, 1);
-                dim3 grid(numBlocks, 1);
+            const unsigned int numBlocks = numNeuronBlocks * numNeuronBlocks;
+            const unsigned int sharedBytes = blockSize * sizeof(unsigned int);
+            dim3 threads(blockSize, 1);
+            dim3 grid(numBlocks, 1);
 
-                for(unsigned int i = 0; i < numTimesteps; i++) {
-                    continuousDenseBlock<<<grid, threads, sharedBytes>>>(numNeurons, numNeurons, numNeuronBlocks * blockSize,
-                                                                         output.second, ePre.second, g.second);
-                }
+            CHECK_CUDA_ERRORS(cudaEventRecord(updateStart));
+            for(unsigned int i = 0; i < numTimesteps; i++) {
+                continuousDenseBlock<<<grid, threads, sharedBytes>>>(numNeurons, numNeurons, numNeuronBlocks * blockSize,
+                                                                        output.second, ePre.second, g.second);
             }
+            CHECK_CUDA_ERRORS(cudaEventRecord(updateEnd));
+            CHECK_CUDA_ERRORS(cudaEventSynchronize(updateEnd));
+            float time;
+            CHECK_CUDA_ERRORS(cudaEventElapsedTime(&time, updateStart, updateEnd));
 
             deviceToHostCopy(output, numNeurons);
             const float sum = std::accumulate(&output.first[0], &output.first[numNeurons], 0.0f);
-            std::cout << "Sum:" << sum << std::endl;
+            std::cout << "Continous Dense Block: sum:" << sum << ", time:" << time << std::endl;
         }
     }
     else {
@@ -379,29 +355,29 @@ int main(int argc, char *argv[])
         hostToDeviceCopy(deltaG, numSynapses);
 
         {
-            {
-                Timer<std::milli> t("ePropALIF Dense:");
-                const unsigned int numBlocks = (numSynapses + blockSize - 1) / blockSize;
-                dim3 threads(blockSize, 1);
-                dim3 grid(numBlocks, 1);
+            const unsigned int numBlocks = (numSynapses + blockSize - 1) / blockSize;
+            dim3 threads(blockSize, 1);
+            dim3 grid(numBlocks, 1);
 
-                for(unsigned int i = 0; i < numTimesteps; i++) {
-                    epropALIFDense<<<grid, threads>>>(numNeurons, numNeurons,
-                                                      zFilterPre.second,  psiPost.second,
-                                                      fAvgPost.second, ePost.second,
-                                                      eFiltered.second, epsilonA.second, deltaG.second);
-                }
+            CHECK_CUDA_ERRORS(cudaEventRecord(updateStart));
+            for(unsigned int i = 0; i < numTimesteps; i++) {
+                epropALIFDense<<<grid, threads>>>(numNeurons, numNeurons,
+                                                    zFilterPre.second,  psiPost.second,
+                                                    fAvgPost.second, ePost.second,
+                                                    eFiltered.second, epsilonA.second, deltaG.second);
             }
+            CHECK_CUDA_ERRORS(cudaEventRecord(updateEnd));
+            CHECK_CUDA_ERRORS(cudaEventSynchronize(updateEnd));
+            float time;
+            CHECK_CUDA_ERRORS(cudaEventElapsedTime(&time, updateStart, updateEnd));
 
             deviceToHostCopy(eFiltered, numSynapses);
             deviceToHostCopy(epsilonA, numSynapses);
             deviceToHostCopy(deltaG, numSynapses);
             const float eFilteredSum = std::accumulate(&eFiltered.first[0], &eFiltered.first[numSynapses], 0.0f);
-            std::cout << "eFiltered sum:" << eFilteredSum << std::endl;
             const float epsilonASum = std::accumulate(&epsilonA.first[0], &epsilonA.first[numSynapses], 0.0f);
-            std::cout << "epsilonA sum:" << epsilonASum << std::endl;
             const float deltaGSum = std::accumulate(&deltaG.first[0], &deltaG.first[numSynapses], 0.0f);
-            std::cout << "deltaG sum:" << deltaGSum << std::endl;
+            std::cout << "eProp ALIF Dense: eFiltered sum:" << eFilteredSum << ", epsilonA sum:" << epsilonASum << ", deltaG sum:" << deltaGSum << ", time: " << time << std::endl;
         }
 
          // Zero synaptic state
@@ -413,30 +389,30 @@ int main(int argc, char *argv[])
         hostToDeviceCopy(deltaG, numSynapses);
 
         {
-            {
-                Timer<std::milli> t("ePropALIF Dense Block:");
-                const unsigned int numBlocks = numNeuronBlocks * numNeuronBlocks;
-                const unsigned int sharedBytes = blockSize * sizeof(unsigned int);
-                dim3 threads(blockSize, 1);
-                dim3 grid(numBlocks, 1);
+            const unsigned int numBlocks = numNeuronBlocks * numNeuronBlocks;
+            const unsigned int sharedBytes = blockSize * sizeof(unsigned int);
+            dim3 threads(blockSize, 1);
+            dim3 grid(numBlocks, 1);
 
-                for(unsigned int i = 0; i < numTimesteps; i++) {
-                    epropALIFDenseBlock<<<grid, threads, sharedBytes>>>(numNeurons, numNeurons, numNeuronBlocks * blockSize,
-                                                                        zFilterPre.second,  psiPost.second,
-                                                                        fAvgPost.second, ePost.second,
-                                                                        eFiltered.second, epsilonA.second, deltaG.second);
-                }
+            CHECK_CUDA_ERRORS(cudaEventRecord(updateStart));
+            for(unsigned int i = 0; i < numTimesteps; i++) {
+                epropALIFDenseBlock<<<grid, threads, sharedBytes>>>(numNeurons, numNeurons, numNeuronBlocks * blockSize,
+                                                                    zFilterPre.second,  psiPost.second,
+                                                                    fAvgPost.second, ePost.second,
+                                                                    eFiltered.second, epsilonA.second, deltaG.second);
             }
+            CHECK_CUDA_ERRORS(cudaEventRecord(updateEnd));
+            CHECK_CUDA_ERRORS(cudaEventSynchronize(updateEnd));
+            float time;
+            CHECK_CUDA_ERRORS(cudaEventElapsedTime(&time, updateStart, updateEnd));
 
             deviceToHostCopy(eFiltered, numSynapses);
             deviceToHostCopy(epsilonA, numSynapses);
             deviceToHostCopy(deltaG, numSynapses);
             const float eFilteredSum = std::accumulate(&eFiltered.first[0], &eFiltered.first[numSynapses], 0.0f);
-            std::cout << "eFiltered sum:" << eFilteredSum << std::endl;
             const float epsilonASum = std::accumulate(&epsilonA.first[0], &epsilonA.first[numSynapses], 0.0f);
-            std::cout << "epsilonA sum:" << epsilonASum << std::endl;
             const float deltaGSum = std::accumulate(&deltaG.first[0], &deltaG.first[numSynapses], 0.0f);
-            std::cout << "deltaG sum:" << deltaGSum << std::endl;
+            std::cout << "eProp ALIF Dense Block: eFiltered sum:" << eFilteredSum << ", epsilonA sum:" << epsilonASum << ", deltaG sum:" << deltaGSum << ", time: " << time << std::endl;
         }
     
     }
