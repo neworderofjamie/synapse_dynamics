@@ -272,6 +272,9 @@ int main(int argc, char *argv[])
     if(argc > 3) {
         blockSize = std::stoul(argv[3]);
     }
+    if(argc > 4) {
+        numTimesteps = std::stoul(argv[4]);
+    }
 
     std::cout << "Model:" << static_cast<int>(model) << ", num neurons:" << numNeurons << ", block size:" << blockSize << std::endl;
 
